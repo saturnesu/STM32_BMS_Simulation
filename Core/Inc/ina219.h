@@ -8,5 +8,7 @@
 
 HAL_StatusTypeDef INA219_Init(I2C_HandleTypeDef *hi2c);
 HAL_StatusTypeDef INA219_ReadVoltage(I2C_HandleTypeDef *hi2c, float *bus_voltage_V);
+HAL_StatusTypeDef INA219_ReadCurrent(I2C_HandleTypeDef *hi2c, float *current_mA);
+
 
 #endif /* INC_INA219_H_ */

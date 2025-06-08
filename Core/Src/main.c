@@ -23,7 +23,7 @@
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
-float voltage = 0;
+
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -38,24 +38,31 @@ int __io_putchar(int ch)
 
 int main(void)
 {
-  HAL_Init();
-  SystemClock_Config();
-  MX_GPIO_Init();
-  MX_USART2_UART_Init();
-  MX_I2C1_Init();
+	float voltage, current;
 
-  INA219_Init(&hi2c1);
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_USART2_UART_Init();
+    MX_I2C1_Init();
 
-  while (1)
-  {
-    if (INA219_ReadVoltage(&hi2c1, &voltage) == HAL_OK) {
-        printf("Voltage: %.3f V\r\n", voltage);
-    } else {
-        printf("INA219 read failed.\r\n");
-    }
+    INA219_Init(&hi2c1);
 
-    HAL_Delay(1000); // every 1s.
-  }
+    while (1) {
+
+    	if (INA219_ReadVoltage(&hi2c1, &voltage) == HAL_OK &&
+    	    INA219_ReadCurrent(&hi2c1, &current) == HAL_OK)
+    	{
+    	    float power = voltage * (current / 1000.0f);
+    	    printf("Voltage: %.3f V | Current: %.3f mA | Power: %.3f W\r\n", voltage, current, power);
+    	}
+    	else
+    	{
+    	    printf("INA219 read failed.\r\n");
+    	}
+
+	    HAL_Delay(1000);
+	    }
 }
 
 /**
