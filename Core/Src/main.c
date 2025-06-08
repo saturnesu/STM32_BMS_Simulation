@@ -38,7 +38,11 @@ int __io_putchar(int ch)
 
 int main(void)
 {
-	float voltage, current;
+	// Variables to track max/min values
+	float max_voltage = 0.0f;
+	float min_voltage = 100.0f;
+	float max_current = 0.0f;
+	float min_current = 10000.0f;
 
     HAL_Init();
     SystemClock_Config();
@@ -48,13 +52,44 @@ int main(void)
 
     INA219_Init(&hi2c1);
 
+    // Main loop
     while (1) {
+
+    	float voltage, current = 0.0f;
 
     	if (INA219_ReadVoltage(&hi2c1, &voltage) == HAL_OK &&
     	    INA219_ReadCurrent(&hi2c1, &current) == HAL_OK)
     	{
-    	    float power = voltage * (current / 1000.0f);
+    	    float power = voltage * (current / 1000.0f); // Convert mA to A
+
+    	    // Print current reading
     	    printf("Voltage: %.3f V | Current: %.3f mA | Power: %.3f W\r\n", voltage, current, power);
+
+    	    // Update max/min voltage
+			if (voltage > max_voltage) max_voltage = voltage;
+			if (voltage < min_voltage) min_voltage = voltage;
+
+			// Update max/min current
+			if (current > max_current) max_current = current;
+			if (current < min_current) min_current = current;
+
+			// Print tracked extremes
+			printf("Voltage (min/max): %.3f V / %.3f V | Current (min/max): %.3f mA / %.3f mA\r\n",
+				   min_voltage, max_voltage, min_current, max_current);
+
+    	    // Battery protection checks
+    	    if (voltage < 3.0f)
+    	    {
+    	    	printf("Undervoltage detected!\r\n");
+    	    }
+    	    else if (voltage > 4.2f)
+    	    {
+    	    	printf("Overcurrent detected!\r\n");
+    	    }
+    	    if (current > 500.0f)
+    	    {
+    	    	printf("Overcurrent detected!\r\n");
+    	    }
     	}
     	else
     	{
