@@ -19,6 +19,10 @@
 #include "ina219.h"
 #include "stdio.h"
 
+// Thresholds
+#define OV_THRESHOLD_V 4.2f     // Overvoltage
+#define UV_THRESHOLD_V 3.0f     // Undervoltage
+#define OC_THRESHOLD_mA 2000.0f // Overcurrent
 
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
@@ -52,10 +56,14 @@ int main(void)
 
     INA219_Init(&hi2c1);
 
+    // Ensure load is initially connected
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
+
     // Main loop
     while (1) {
 
-    	float voltage, current = 0.0f;
+    	float voltage = 0.0f;
+    	float current = 0.0f;
 
     	if (INA219_ReadVoltage(&hi2c1, &voltage) == HAL_OK &&
     	    INA219_ReadCurrent(&hi2c1, &current) == HAL_OK)
@@ -77,19 +85,8 @@ int main(void)
 			printf("Voltage (min/max): %.3f V / %.3f V | Current (min/max): %.3f mA / %.3f mA\r\n",
 				   min_voltage, max_voltage, min_current, max_current);
 
-    	    // Battery protection checks
-    	    if (voltage < 3.0f)
-    	    {
-    	    	printf("Undervoltage detected!\r\n");
-    	    }
-    	    else if (voltage > 4.2f)
-    	    {
-    	    	printf("Overcurrent detected!\r\n");
-    	    }
-    	    if (current > 500.0f)
-    	    {
-    	    	printf("Overcurrent detected!\r\n");
-    	    }
+    	    // Check battery safety and control load
+    	    CheckBatterySafety(voltage, current);
     	}
     	else
     	{
@@ -98,6 +95,37 @@ int main(void)
 
 	    HAL_Delay(1000);
 	    }
+}
+
+// Function to control load based on measurements
+/// @brief  Check battery parameters and enable/disable load accordingly.
+/// @param  voltage    Last measured bus voltage (V)
+/// @param  current_mA Last measured current (mA)
+void CheckBatterySafety(float voltage, float current_mA)
+{
+	// 'static' retains its value between calls
+    static uint8_t load_connected = 1;
+
+    if (voltage > OV_THRESHOLD_V || voltage < UV_THRESHOLD_V || current_mA > OC_THRESHOLD_mA)
+    {
+        // Dangerous condition — disconnect load
+        if (load_connected)
+        {
+        	// Drive PB0 LOW to open the MOSFET/relay
+            HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
+            load_connected = 0;
+            printf("Protection triggered: Load disconnected\r\n");
+        }
+    }
+    else
+    {
+        // Conditions safe — reconnect if needed
+        if (!load_connected) {
+            HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_SET);
+            load_connected = 1;
+            printf("Conditions safe: Load reconnected\r\n");
+        }
+    }
 }
 
 /**
@@ -234,6 +262,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
+
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
@@ -246,6 +277,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : LOAD_EN_Pin */
+  GPIO_InitStruct.Pin = LOAD_EN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LOAD_EN_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
