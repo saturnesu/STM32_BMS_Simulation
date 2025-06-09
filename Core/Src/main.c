@@ -1,23 +1,23 @@
-/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
+  * @author			: Vaggelis Koutouloulis
+  * @date			: June 2025
+  * @brief          : Battery monitoring and protection system using INA219 sensors and STM32.
   ******************************************************************************
-  * @attention
   *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
+  * This program measures voltage, current, and power across 3 battery cells
+  * using INA219 sensors over I2C and protects the load from unsafe conditions.
   *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * Developed by Vaggelis Koutouloulis as part of a personal engineering portfolio.
   *
   ******************************************************************************
   */
 #include "main.h"
 #include "ina219.h"
 #include "stdio.h"
+
+#define NUM_CELLS 3
 
 // Thresholds
 #define OV_THRESHOLD_V 4.2f     // Overvoltage
@@ -27,26 +27,32 @@
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
+// I2C addresses of the 3 INA219 modules (left-shifted for STM32 HAL)
+const uint8_t ina_addresses[NUM_CELLS] = {
+    INA219_ADDR_CELL1,
+    INA219_ADDR_CELL2,
+    INA219_ADDR_CELL3
+};
 
-
-void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_USART2_UART_Init(void);
-
+// For printf over UART
 int __io_putchar(int ch)
 {
     HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, HAL_MAX_DELAY);
     return ch;
 }
 
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
+
 int main(void)
 {
 	// Variables to track max/min values
-	float max_voltage = 0.0f;
-	float min_voltage = 100.0f;
-	float max_current = 0.0f;
-	float min_current = 10000.0f;
+	float max_voltage[NUM_CELLS];
+	float min_voltage[NUM_CELLS];
+	float max_current[NUM_CELLS];
+	float min_current[NUM_CELLS];
 
     HAL_Init();
     SystemClock_Config();
@@ -54,47 +60,69 @@ int main(void)
     MX_USART2_UART_Init();
     MX_I2C1_Init();
 
-    INA219_Init(&hi2c1);
+    //INA219_Init(&hi2c1);
+
+    // Array of cells — one struct per INA219
+    CellData cells[NUM_CELLS];
 
     // Ensure load is initially connected
     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
 
+    for (int i = 0; i < NUM_CELLS; ++i) {
+        max_voltage[i] = 0.0f;
+        min_voltage[i] = 100.0f;      // High initial value for max
+        max_current[i] = 0.0f;
+        min_current[i] = 10000.0f;    // High initial value for min
+    }
+
     // Main loop
-    while (1) {
+    while (1)
+    {
 
     	float voltage = 0.0f;
     	float current = 0.0f;
 
-    	if (INA219_ReadVoltage(&hi2c1, &voltage) == HAL_OK &&
-    	    INA219_ReadCurrent(&hi2c1, &current) == HAL_OK)
-    	{
-    	    float power = voltage * (current / 1000.0f); // Convert mA to A
+    	for (int i = 0; i < NUM_CELLS; ++i)
+		{
+			// Read voltage, current, power for this cell
+			if (INA219_ReadAll(&hi2c1, ina_addresses[i], &cells[i]) == HAL_OK)
+			{
+				// Update min/max voltage
+				if (cells[i].voltage_V > max_voltage[i]) max_voltage[i] = cells[i].voltage_V;
+				if (cells[i].voltage_V < min_voltage[i]) min_voltage[i] = cells[i].voltage_V;
 
-    	    // Print current reading
-    	    printf("Voltage: %.3f V | Current: %.3f mA | Power: %.3f W\r\n", voltage, current, power);
+				// Update min/max current
+				if (cells[i].current_mA > max_current[i]) max_current[i] = cells[i].current_mA;
+				if (cells[i].current_mA < min_current[i]) min_current[i] = cells[i].current_mA;
 
-    	    // Update max/min voltage
-			if (voltage > max_voltage) max_voltage = voltage;
-			if (voltage < min_voltage) min_voltage = voltage;
+				// Print current reading and min/max stats
+				printf("Cell %d: V=%.3f V (Min: %.3f, Max: %.3f) | I=%.3f mA (Min: %.3f, Max: %.3f) | P=%.3f W\r\n",
+					   i + 1,
+					   cells[i].voltage_V, min_voltage[i], max_voltage[i],
+					   cells[i].current_mA, min_current[i], max_current[i],
+					   cells[i].power_W);
 
-			// Update max/min current
-			if (current > max_current) max_current = current;
-			if (current < min_current) min_current = current;
+			// Basic protection status
+			if (cells[i].voltage_V < UV_THRESHOLD_V)
+				printf("  → Cell %d: Undervoltage!\r\n", i + 1);
 
-			// Print tracked extremes
-			printf("Voltage (min/max): %.3f V / %.3f V | Current (min/max): %.3f mA / %.3f mA\r\n",
-				   min_voltage, max_voltage, min_current, max_current);
+			if (cells[i].voltage_V > OV_THRESHOLD_V)
+				printf("  → Cell %d: Overvoltage!\r\n", i + 1);
 
-    	    // Check battery safety and control load
-    	    CheckBatterySafety(voltage, current);
-    	}
-    	else
-    	{
-    	    printf("INA219 read failed.\r\n");
-    	}
+			if (cells[i].current_mA > OC_THRESHOLD_mA)
+				printf("  → Cell %d: Overcurrent!\r\n", i + 1);
+			}
+			else
+			{
+				printf("Cell %d: INA219 read failed.\r\n", i + 1);
+			}
 
-	    HAL_Delay(1000);
-	    }
+			CheckBatterySafety(cells[i].voltage_V, cells[i].current_mA);
+		}
+
+		printf("--------------------------------------------------\r\n");
+		HAL_Delay(1000);
+	}
 }
 
 // Function to control load based on measurements
