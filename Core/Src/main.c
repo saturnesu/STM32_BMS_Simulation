@@ -99,10 +99,6 @@ int main(void) {
     // Array of cells — one struct per INA219
     CellStatus cells[NUM_CELLS];
 
-    // Array for Fuel Gauge
-    float soc_values[NUM_CELLS] = {0};
-    float voltages[NUM_CELLS] = {0};
-
     // Variables to track max/min values
     float max_voltage[NUM_CELLS] = {0};
     float min_voltage[NUM_CELLS] = {100.0f};	// High initial value for max
@@ -151,17 +147,17 @@ int main(void) {
                 printf("Cell %d: INA219 read failed.\r\n", i + 1);
                 cells[i].fault = 1;
             }
-        }
 
-        // Read SoC from MAX17043
-		float soc = 0.0f;
-		MAX17043_SelectChannel(&hi2c1, i);
-		if (MAX17043_ReadSOC(&hi2c1, &soc) == HAL_OK) {
-			cells[i].soc_percent = soc;
-		} else {
-			printf("Cell %d: MAX17043 read failed\r\n", i + 1);
-			cells[i].fault = 1;
-		}
+            // Read SoC from MAX17043
+    		float soc = 0.0f;
+    		MAX17043_SelectChannel(&hi2c1, i);
+    		if (MAX17043_ReadSOC(&hi2c1, &soc) == HAL_OK) {
+    			cells[i].soc_percent = soc;
+    		} else {
+    			printf("Cell %d: MAX17043 read failed\r\n", i + 1);
+    			cells[i].fault = 1;
+    		}
+        }
 
         DisplayToOLED(cells, NUM_CELLS);
 
