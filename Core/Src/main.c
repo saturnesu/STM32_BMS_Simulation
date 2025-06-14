@@ -23,6 +23,7 @@
 #include "stdio.h"
 #include "ssd1306.h"
 #include "max17043.h"
+#include "tca9548a.h"
 
 #define NUM_CELLS 3
 
@@ -43,6 +44,7 @@ typedef struct {
     CellData data;
     uint8_t fault;
     float temperature_C;
+    float soc_percent;
 } CellStatus;
 
 static BMS_State_t currentState = BMS_STATE_IDLE;
@@ -86,12 +88,20 @@ int main(void) {
     SSD1306_Init(&hi2c1);
     SSD1306_Clear();
     SSD1306_UpdateScreen();
-    MAX17043_QuickStart(&hi2c1);
+
+    for (int i = 0; i < NUM_CELLS; ++i) {
+        MAX17043_SelectChannel(&hi2c1, i);
+        MAX17043_QuickStart(&hi2c1);
+    }
 
     //INA219_Init(&hi2c1);
 
     // Array of cells — one struct per INA219
     CellStatus cells[NUM_CELLS];
+
+    // Array for Fuel Gauge
+    float soc_values[NUM_CELLS] = {0};
+    float voltages[NUM_CELLS] = {0};
 
     // Variables to track max/min values
     float max_voltage[NUM_CELLS] = {0};
@@ -142,6 +152,16 @@ int main(void) {
                 cells[i].fault = 1;
             }
         }
+
+        // Read SoC from MAX17043
+		float soc = 0.0f;
+		MAX17043_SelectChannel(&hi2c1, i);
+		if (MAX17043_ReadSOC(&hi2c1, &soc) == HAL_OK) {
+			cells[i].soc_percent = soc;
+		} else {
+			printf("Cell %d: MAX17043 read failed\r\n", i + 1);
+			cells[i].fault = 1;
+		}
 
         DisplayToOLED(cells, NUM_CELLS);
 
@@ -216,47 +236,60 @@ void CheckBatterySafety(float voltage, float current_mA, float temperature_C)
 	}
 }
 
+// Charging Bar function (0-100%) to OLED, width 40px
+static void DrawChargeBar(int x, int y, float percent) {
+    int barWidth = 40;
+    int fillWidth = (int)((percent / 100.0f) * barWidth);
+    SSD1306_DrawRect(x, y, barWidth, 7, 1);
+    if (fillWidth > 0) {
+        SSD1306_FillRect(x + 1, y + 1, fillWidth - 2, 5, 1);
+    }
+}
+
 void DisplayToOLED(CellStatus cells[], int num_cells) {
     SSD1306_Clear();
 
     char line[16];
 
-    // Headers: C1, C2, C3
     for (int i = 0; i < num_cells; ++i) {
         snprintf(line, sizeof(line), "C%d", i + 1);
-        SSD1306_GotoXY(0 + i * 42, 0);  // 42 px distance per cell (128px / 3 ≈ 42)
+        SSD1306_GotoXY(0 + i * 42, 0);
         SSD1306_Puts(line, &Font_6x8, 1);
     }
 
-    // Voltage
     for (int i = 0; i < num_cells; ++i) {
         snprintf(line, sizeof(line), "%.2fV", cells[i].data.voltage_V);
         SSD1306_GotoXY(0 + i * 42, 10);
         SSD1306_Puts(line, &Font_6x8, 1);
     }
 
-    // Current
     for (int i = 0; i < num_cells; ++i) {
         snprintf(line, sizeof(line), "%.0fmA", cells[i].data.current_mA);
         SSD1306_GotoXY(0 + i * 42, 20);
         SSD1306_Puts(line, &Font_6x8, 1);
     }
 
-    // Temperature
     for (int i = 0; i < num_cells; ++i) {
         snprintf(line, sizeof(line), "%.1fC", cells[i].temperature_C);
         SSD1306_GotoXY(0 + i * 42, 30);
         SSD1306_Puts(line, &Font_6x8, 1);
     }
 
-    // Status: OK / FAULT
     for (int i = 0; i < num_cells; ++i) {
         snprintf(line, sizeof(line), "%s", cells[i].fault ? "FAULT" : "OK");
         SSD1306_GotoXY(0 + i * 42, 40);
         SSD1306_Puts(line, &Font_6x8, 1);
     }
 
-    // BMS Status
+    // Display SOC % with number and charging bar
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "%.0f%%", cells[i].soc_percent);
+        SSD1306_GotoXY(0 + i * 42, 50);
+        SSD1306_Puts(line, &Font_6x8, 1);
+
+        DrawChargeBar(0 + i * 42, 57, cells[i].soc_percent);
+    }
+
     const char *state_str = "";
     switch (currentState) {
         case BMS_STATE_IDLE:         state_str = "IDLE"; break;
@@ -265,7 +298,7 @@ void DisplayToOLED(CellStatus cells[], int num_cells) {
         case BMS_STATE_FAULT:        state_str = "FAULT"; break;
     }
     snprintf(line, sizeof(line), "State: %s", state_str);
-    SSD1306_GotoXY(0, 56);  // Last line
+    SSD1306_GotoXY(0, 48);
     SSD1306_Puts(line, &Font_6x8, 1);
 
     SSD1306_UpdateScreen();
