@@ -5,8 +5,8 @@
 
 // INA219 I2C addresses (shifted for HAL)
 #define INA219_ADDR_CELL1 (0x40 << 1)
-#define INA219_ADDR_CELL2 (0x41 << 1)
-#define INA219_ADDR_CELL3 (0x44 << 1)
+#define INA219_ADDR_CELL2 (0x42 << 1)
+#define INA219_ADDR_CELL3 (0x43 << 1)
 
 // Define structure for 1 cell
 typedef struct

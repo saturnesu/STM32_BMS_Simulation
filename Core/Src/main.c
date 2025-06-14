@@ -5,17 +5,24 @@
   * @date			: June 2025
   * @brief          : Battery monitoring and protection system using INA219 sensors and STM32.
   ******************************************************************************
+
   *
   * This program measures voltage, current, and power across 3 battery cells
   * using INA219 sensors over I2C and protects the load from unsafe conditions.
   *
   * Developed by Vaggelis Koutouloulis as part of a personal engineering portfolio.
+
+
   *
   ******************************************************************************
   */
 #include "main.h"
 #include "ina219.h"
+#include "ina219_multi.h"
+#include "tmp102_multi.h"
 #include "stdio.h"
+#include "ssd1306.h"
+#include "max17043.h"
 
 #define NUM_CELLS 3
 
@@ -23,137 +30,245 @@
 #define OV_THRESHOLD_V 4.2f     // Overvoltage
 #define UV_THRESHOLD_V 3.0f     // Undervoltage
 #define OC_THRESHOLD_mA 2000.0f // Overcurrent
+#define OT_THRESHOLD_C 60.0f	// Overtemperature
+
+typedef enum {
+    BMS_STATE_IDLE = 0,
+    BMS_STATE_CHARGING,
+    BMS_STATE_DISCHARGING,
+    BMS_STATE_FAULT
+} BMS_State_t;
+
+typedef struct {
+    CellData data;
+    uint8_t fault;
+    float temperature_C;
+} CellStatus;
+
+static BMS_State_t currentState = BMS_STATE_IDLE;
 
 I2C_HandleTypeDef hi2c1;
 UART_HandleTypeDef huart2;
 
-// I2C addresses of the 3 INA219 modules (left-shifted for STM32 HAL)
+// I2C addresses of the 3 INA219 (left-shifted for STM32 HAL)
 const uint8_t ina_addresses[NUM_CELLS] = {
     INA219_ADDR_CELL1,
     INA219_ADDR_CELL2,
     INA219_ADDR_CELL3
 };
 
+// I2C addresses of the 3 TMP102 (left-shifted for STM32 HAL)
+const uint8_t tmp102_addresses[NUM_CELLS] = {
+    TMP102_ADDR_CELL1,
+    TMP102_ADDR_CELL2,
+    TMP102_ADDR_CELL3
+};
+
 // For printf over UART
-int __io_putchar(int ch)
-{
+int __io_putchar(int ch) {
     HAL_UART_Transmit(&huart2, (uint8_t*)&ch, 1, HAL_MAX_DELAY);
     return ch;
 }
 
-void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
+void SystemClock_Config(void);
+void CheckBatterySafety(float voltage, float current_mA, float temperature_C);
+void DisplayToOLED(CellStatus cells[], int num_cells);
 
-int main(void)
-{
-	// Variables to track max/min values
-	float max_voltage[NUM_CELLS];
-	float min_voltage[NUM_CELLS];
-	float max_current[NUM_CELLS];
-	float min_current[NUM_CELLS];
-
+int main(void) {
     HAL_Init();
     SystemClock_Config();
     MX_GPIO_Init();
     MX_USART2_UART_Init();
     MX_I2C1_Init();
+    SSD1306_Init(&hi2c1);
+    SSD1306_Clear();
+    SSD1306_UpdateScreen();
+    MAX17043_QuickStart(&hi2c1);
 
     //INA219_Init(&hi2c1);
 
     // Array of cells — one struct per INA219
-    CellData cells[NUM_CELLS];
+    CellStatus cells[NUM_CELLS];
+
+    // Variables to track max/min values
+    float max_voltage[NUM_CELLS] = {0};
+    float min_voltage[NUM_CELLS] = {100.0f};	// High initial value for max
+    float max_current[NUM_CELLS] = {0};
+    float min_current[NUM_CELLS] = {10000.0f};	// High initial value for min
 
     // Ensure load is initially connected
-    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET);
-
-    for (int i = 0; i < NUM_CELLS; ++i) {
-        max_voltage[i] = 0.0f;
-        min_voltage[i] = 100.0f;      // High initial value for max
-        max_current[i] = 0.0f;
-        min_current[i] = 10000.0f;    // High initial value for min
-    }
+    HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_SET);
 
     // Main loop
-    while (1)
-    {
+    while (1) {
+        for (int i = 0; i < NUM_CELLS; ++i) {
+            cells[i].fault = 0;
+            // Read voltage, current, power for this cell
+            if (INA219_ReadAll(&hi2c1, ina_addresses[i], &cells[i].data) == HAL_OK) {
+                float V = cells[i].data.voltage_V;
+                float I = cells[i].data.current_mA;
 
-    	float voltage = 0.0f;
-    	float current = 0.0f;
+                // Read Temperature
+                float T = 0.0f;
+				if (TMP102_ReadTemperature(&hi2c1, tmp102_addresses[i], &T) == HAL_OK) {
+					cells[i].temperature_C = T;
+				}
+				else  {
+					printf("Cell %d: TMP102 read failed\r\n", i + 1);
+					cells[i].fault = 1;
+					continue;
+				}
 
-    	for (int i = 0; i < NUM_CELLS; ++i)
-		{
-			// Read voltage, current, power for this cell
-			if (INA219_ReadAll(&hi2c1, ina_addresses[i], &cells[i]) == HAL_OK)
-			{
-				// Update min/max voltage
-				if (cells[i].voltage_V > max_voltage[i]) max_voltage[i] = cells[i].voltage_V;
-				if (cells[i].voltage_V < min_voltage[i]) min_voltage[i] = cells[i].voltage_V;
+                // Update min/max voltage
+                if (V > max_voltage[i]) max_voltage[i] = V;
+                if (V < min_voltage[i]) min_voltage[i] = V;
+                if (I > max_current[i]) max_current[i] = I;
+                if (I < min_current[i]) min_current[i] = I;
 
-				// Update min/max current
-				if (cells[i].current_mA > max_current[i]) max_current[i] = cells[i].current_mA;
-				if (cells[i].current_mA < min_current[i]) min_current[i] = cells[i].current_mA;
+                // Print current reading and min/max stats
+                printf("Cell %d: V=%.3f V | I=%.3f mA | T=%.2f °C | P=%.3f W\r\n", i + 1, V, I, T, cells[i].data.power_W);
 
-				// Print current reading and min/max stats
-				printf("Cell %d: V=%.3f V (Min: %.3f, Max: %.3f) | I=%.3f mA (Min: %.3f, Max: %.3f) | P=%.3f W\r\n",
-					   i + 1,
-					   cells[i].voltage_V, min_voltage[i], max_voltage[i],
-					   cells[i].current_mA, min_current[i], max_current[i],
-					   cells[i].power_W);
+                //Fault detection
+                if (V > OV_THRESHOLD_V || V < UV_THRESHOLD_V || I > OC_THRESHOLD_mA || T > OT_THRESHOLD_C) {
+                    cells[i].fault = 1;
+                }
+                // Control load
+                CheckBatterySafety(V, I, T);
+            } else {
+                printf("Cell %d: INA219 read failed.\r\n", i + 1);
+                cells[i].fault = 1;
+            }
+        }
 
-			// Basic protection status
-			if (cells[i].voltage_V < UV_THRESHOLD_V)
-				printf("  → Cell %d: Undervoltage!\r\n", i + 1);
+        DisplayToOLED(cells, NUM_CELLS);
 
-			if (cells[i].voltage_V > OV_THRESHOLD_V)
-				printf("  → Cell %d: Overvoltage!\r\n", i + 1);
+        // ----------- BMS STATE LOGIC --------------
+        switch (currentState) {
+            case BMS_STATE_IDLE:
+                for (int i = 0; i < NUM_CELLS; ++i) {
+                    float I = cells[i].data.current_mA;
+                    if (I < -50.0f) {
+                        currentState = BMS_STATE_CHARGING;
+                        printf("→ State: CHARGING\r\n");
+                        break;
+                    } else if (I > 50.0f) {
+                        currentState = BMS_STATE_DISCHARGING;
+                        printf("→ State: DISCHARGING\r\n");
+                        break;
+                    }
+                }
+                break;
 
-			if (cells[i].current_mA > OC_THRESHOLD_mA)
-				printf("  → Cell %d: Overcurrent!\r\n", i + 1);
-			}
-			else
-			{
-				printf("Cell %d: INA219 read failed.\r\n", i + 1);
-			}
+            case BMS_STATE_CHARGING:
+            case BMS_STATE_DISCHARGING:
+                for (int i = 0; i < NUM_CELLS; ++i) {
+                    if (cells[i].fault) {
+                        currentState = BMS_STATE_FAULT;
+                        printf("→ FAULT detected (Cell %d)\r\n", i + 1);
+                        break;
+                    }
+                }
+                break;
 
-			CheckBatterySafety(cells[i].voltage_V, cells[i].current_mA);
-		}
+            case BMS_STATE_FAULT:
+                printf("→ System in FAULT: Disconnecting load.\r\n");
+                HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
+                break;
+        }
 
-		printf("--------------------------------------------------\r\n");
-		HAL_Delay(1000);
-	}
+        printf("--------------------------------------------------\r\n");
+        HAL_Delay(1000);
+    }
 }
 
 // Function to control load based on measurements
 /// @brief  Check battery parameters and enable/disable load accordingly.
 /// @param  voltage    Last measured bus voltage (V)
 /// @param  current_mA Last measured current (mA)
-void CheckBatterySafety(float voltage, float current_mA)
+void CheckBatterySafety(float voltage, float current_mA, float temperature_C)
 {
-	// 'static' retains its value between calls
-    static uint8_t load_connected = 1;
+		// 'static' retains its value between calls
+		static uint8_t load_connected = 1;
 
-    if (voltage > OV_THRESHOLD_V || voltage < UV_THRESHOLD_V || current_mA > OC_THRESHOLD_mA)
-    {
-        // Dangerous condition — disconnect load
-        if (load_connected)
-        {
-        	// Drive PB0 LOW to open the MOSFET/relay
-            HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
-            load_connected = 0;
-            printf("Protection triggered: Load disconnected\r\n");
-        }
+		if (voltage > OV_THRESHOLD_V || voltage < UV_THRESHOLD_V || current_mA > OC_THRESHOLD_mA || temperature_C > OT_THRESHOLD_C)
+		{
+			// Dangerous condition — disconnect load
+			if (load_connected)
+			{
+				// Drive PB0 LOW to open the MOSFET
+				HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
+				load_connected = 0;
+				printf("Protection triggered: Load disconnected\r\n");
+			}
+		}
+		else
+		{
+			// Conditions safe — reconnect if needed
+			if (!load_connected)
+		{
+			HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_SET);
+			load_connected = 1;
+			printf("Conditions safe: Load reconnected\r\n");
+		}
+	}
+}
+
+void DisplayToOLED(CellStatus cells[], int num_cells) {
+    SSD1306_Clear();
+
+    char line[16];
+
+    // Headers: C1, C2, C3
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "C%d", i + 1);
+        SSD1306_GotoXY(0 + i * 42, 0);  // 42 px distance per cell (128px / 3 ≈ 42)
+        SSD1306_Puts(line, &Font_6x8, 1);
     }
-    else
-    {
-        // Conditions safe — reconnect if needed
-        if (!load_connected) {
-            HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_SET);
-            load_connected = 1;
-            printf("Conditions safe: Load reconnected\r\n");
-        }
+
+    // Voltage
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "%.2fV", cells[i].data.voltage_V);
+        SSD1306_GotoXY(0 + i * 42, 10);
+        SSD1306_Puts(line, &Font_6x8, 1);
     }
+
+    // Current
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "%.0fmA", cells[i].data.current_mA);
+        SSD1306_GotoXY(0 + i * 42, 20);
+        SSD1306_Puts(line, &Font_6x8, 1);
+    }
+
+    // Temperature
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "%.1fC", cells[i].temperature_C);
+        SSD1306_GotoXY(0 + i * 42, 30);
+        SSD1306_Puts(line, &Font_6x8, 1);
+    }
+
+    // Status: OK / FAULT
+    for (int i = 0; i < num_cells; ++i) {
+        snprintf(line, sizeof(line), "%s", cells[i].fault ? "FAULT" : "OK");
+        SSD1306_GotoXY(0 + i * 42, 40);
+        SSD1306_Puts(line, &Font_6x8, 1);
+    }
+
+    // BMS Status
+    const char *state_str = "";
+    switch (currentState) {
+        case BMS_STATE_IDLE:         state_str = "IDLE"; break;
+        case BMS_STATE_CHARGING:     state_str = "CHARGING"; break;
+        case BMS_STATE_DISCHARGING:  state_str = "DISCHARGING"; break;
+        case BMS_STATE_FAULT:        state_str = "FAULT"; break;
+    }
+    snprintf(line, sizeof(line), "State: %s", state_str);
+    SSD1306_GotoXY(0, 56);  // Last line
+    SSD1306_Puts(line, &Font_6x8, 1);
+
+    SSD1306_UpdateScreen();
 }
 
 /**
@@ -288,9 +403,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LOAD_EN_GPIO_Port, LOAD_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : B1_Pin */
@@ -299,12 +412,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  /*Configure GPIO pins : Cell_2_Status_Pin Cell_3_Status_Pin Cell_1_Status_Pin */
+  GPIO_InitStruct.Pin =Cell_1_Status_Pin|Cell_2_Status_Pin|Cell_3_Status_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
+
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pin : LOAD_EN_Pin */
   GPIO_InitStruct.Pin = LOAD_EN_Pin;
